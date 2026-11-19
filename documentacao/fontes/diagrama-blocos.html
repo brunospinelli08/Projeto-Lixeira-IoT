@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Diagrama de blocos</title>
+<style>
+  body { margin: 0; background: #fff; font-family: Arial, Helvetica, sans-serif; }
+  #diagrama { width: 1100px; padding: 24px; box-sizing: border-box; background: #fff; }
+  svg text { font-family: Arial, Helvetica, sans-serif; }
+</style>
+</head>
+<body>
+<div id="diagrama">
+<svg width="1052" height="560" viewBox="0 0 1052 560" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="seta" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1F4E79"/>
+    </marker>
+  </defs>
+
+  <!-- Faixas -->
+  <rect x="0" y="0" width="470" height="560" rx="14" fill="#F3F7FB" stroke="#C9D8E8"/>
+  <text x="20" y="30" font-size="15" font-weight="bold" fill="#1F4E79">LIXEIRA (hardware)</text>
+  <rect x="490" y="0" width="562" height="560" rx="14" fill="#F7F7F7" stroke="#DDDDDD"/>
+  <text x="510" y="30" font-size="15" font-weight="bold" fill="#555">INTERNET / COMPUTADOR</text>
+
+  <!-- Sensores -->
+  <rect x="20" y="60" width="200" height="86" rx="10" fill="#fff" stroke="#2E75B6" stroke-width="2"/>
+  <text x="120" y="92" font-size="15" font-weight="bold" text-anchor="middle" fill="#1F4E79">Sensor de nível</text>
+  <text x="120" y="112" font-size="13" text-anchor="middle" fill="#333">HC-SR04 (dentro da caixa)</text>
+  <text x="120" y="130" font-size="12" text-anchor="middle" fill="#666">TRIG 5 / ECHO 7</text>
+
+  <rect x="20" y="186" width="200" height="86" rx="10" fill="#fff" stroke="#2E75B6" stroke-width="2"/>
+  <text x="120" y="218" font-size="15" font-weight="bold" text-anchor="middle" fill="#1F4E79">Sensor da mão</text>
+  <text x="120" y="238" font-size="13" text-anchor="middle" fill="#333">HC-SR04 (fora da caixa)</text>
+  <text x="120" y="256" font-size="12" text-anchor="middle" fill="#666">TRIG 2 / ECHO 3</text>
+
+  <!-- Arduino -->
+  <rect x="270" y="110" width="180" height="120" rx="10" fill="#1F4E79"/>
+  <text x="360" y="150" font-size="16" font-weight="bold" text-anchor="middle" fill="#fff">Arduino</text>
+  <text x="360" y="172" font-size="16" font-weight="bold" text-anchor="middle" fill="#fff">UNO R4 WiFi</text>
+  <text x="360" y="198" font-size="12" text-anchor="middle" fill="#CFE0F1">lógica + Wi-Fi + MQTT</text>
+
+  <!-- Servo -->
+  <rect x="20" y="330" width="200" height="86" rx="10" fill="#fff" stroke="#C55A11" stroke-width="2"/>
+  <text x="120" y="362" font-size="15" font-weight="bold" text-anchor="middle" fill="#C55A11">Servo motor</text>
+  <text x="120" y="382" font-size="13" text-anchor="middle" fill="#333">abre / fecha a tampa</text>
+  <text x="120" y="400" font-size="12" text-anchor="middle" fill="#666">pino 9 (PWM)</text>
+
+  <!-- setas sensores -> arduino -->
+  <line x1="220" y1="103" x2="268" y2="140" stroke="#1F4E79" stroke-width="2" marker-end="url(#seta)"/>
+  <line x1="220" y1="229" x2="268" y2="200" stroke="#1F4E79" stroke-width="2" marker-end="url(#seta)"/>
+  <!-- arduino -> servo -->
+  <path d="M360 230 L360 373 L222 373" fill="none" stroke="#1F4E79" stroke-width="2" marker-end="url(#seta)"/>
+
+  <!-- Roteador -->
+  <rect x="270" y="440" width="180" height="70" rx="10" fill="#fff" stroke="#888" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="360" y="470" font-size="15" font-weight="bold" text-anchor="middle" fill="#444">Roteador Wi-Fi</text>
+  <text x="360" y="490" font-size="12" text-anchor="middle" fill="#666">rede local / celular</text>
+  <line x1="410" y1="232" x2="410" y2="438" stroke="#1F4E79" stroke-width="2" marker-start="url(#seta)" marker-end="url(#seta)"/>
+  <text x="418" y="340" font-size="12" fill="#1F4E79">Wi-Fi</text>
+
+  <!-- Broker -->
+  <rect x="540" y="200" width="210" height="110" rx="55" fill="#E2EFDA" stroke="#548235" stroke-width="2"/>
+  <text x="645" y="240" font-size="16" font-weight="bold" text-anchor="middle" fill="#385723">Broker MQTT</text>
+  <text x="645" y="262" font-size="13" text-anchor="middle" fill="#333">broker.hivemq.com</text>
+  <text x="645" y="282" font-size="12" text-anchor="middle" fill="#666">porta 1883 (nuvem)</text>
+  <path d="M452 475 L645 475 L645 312" fill="none" stroke="#1F4E79" stroke-width="2" marker-start="url(#seta)" marker-end="url(#seta)"/>
+  <text x="470" y="466" font-size="12" fill="#1F4E79">MQTT (TCP)</text>
+
+  <!-- Servidor -->
+  <rect x="820" y="60" width="210" height="110" rx="10" fill="#fff" stroke="#2E75B6" stroke-width="2"/>
+  <text x="925" y="94" font-size="15" font-weight="bold" text-anchor="middle" fill="#1F4E79">Servidor Node.js</text>
+  <text x="925" y="116" font-size="12" text-anchor="middle" fill="#333">Express + Socket.io</text>
+  <text x="925" y="134" font-size="12" text-anchor="middle" fill="#333">assina os tópicos e</text>
+  <text x="925" y="152" font-size="12" text-anchor="middle" fill="#333">guarda o histórico</text>
+  <path d="M752 240 L800 240 L800 115 L818 115" fill="none" stroke="#1F4E79" stroke-width="2" marker-start="url(#seta)" marker-end="url(#seta)"/>
+  <text x="760" y="200" font-size="12" fill="#1F4E79">MQTT</text>
+
+  <!-- Dashboard -->
+  <rect x="820" y="330" width="210" height="120" rx="10" fill="#fff" stroke="#2E75B6" stroke-width="2"/>
+  <text x="925" y="364" font-size="15" font-weight="bold" text-anchor="middle" fill="#1F4E79">Dashboard</text>
+  <text x="925" y="386" font-size="12" text-anchor="middle" fill="#333">navegador (PC / celular)</text>
+  <text x="925" y="406" font-size="12" text-anchor="middle" fill="#333">nível, gráfico, tampa,</text>
+  <text x="925" y="424" font-size="12" text-anchor="middle" fill="#333">botões Abrir / Fechar</text>
+  <line x1="925" y1="172" x2="925" y2="328" stroke="#1F4E79" stroke-width="2" marker-start="url(#seta)" marker-end="url(#seta)"/>
+  <text x="933" y="255" font-size="12" fill="#1F4E79">Socket.io</text>
+  <text x="933" y="271" font-size="12" fill="#1F4E79">(HTTP)</text>
+
+  <!-- Legenda -->
+  <text x="662" y="370" font-size="12" fill="#333" font-weight="bold">Sobe para o site:</text>
+  <text x="662" y="388" font-size="12" fill="#333">status, nível, distância,</text>
+  <text x="662" y="404" font-size="12" fill="#333">tampa, aberturas,</text>
+  <text x="662" y="420" font-size="12" fill="#333">online/offline</text>
+  <text x="662" y="446" font-size="12" fill="#333" font-weight="bold">Desce para o Arduino:</text>
+  <text x="662" y="464" font-size="12" fill="#333">comando (abrir/fechar)</text>
+</svg>
+</div>
+</body>
+</html>
