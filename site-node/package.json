@@ -1,0 +1,11 @@
+{
+  "name": "site-lixeira-iot",
+  "version": "1.0.0",
+  "description": "Painel web IoT para lixeira remota",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.19.2",
+    "mqtt": "^5.16.1",
+    "socket.io": "^4.7.5"
+  }
+}
