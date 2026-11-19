@@ -10,9 +10,24 @@ const mqtt = require('mqtt');
 const PORT = Number(process.env.PORT) || 3000;
 const MQTT_URL = process.env.MQTT_URL || 'mqtt://broker.hivemq.com:1883';
 
-const MQTT_TOPIC_STATUS = 'eseg/lixeira/juan-caua-bruno/status'; // vazia / normal / cheia
-const MQTT_TOPIC_TAMPA = 'eseg/lixeira/juan-caua-bruno/tampa';   // aberta / fechada
-const MQTT_TOPIC_COMANDO = 'eseg/lixeira/juan-caua-bruno/comando';
+// LIXEIRA_PREFIXO permite testar em outro topico sem atrapalhar a lixeira real
+const PREFIXO = process.env.LIXEIRA_PREFIXO || 'eseg/lixeira/juan-caua-bruno/';
+const MQTT_TOPIC_COMANDO = PREFIXO + 'comando'; // abrir / fechar (site -> Arduino)
+
+// Topicos publicados pelo Arduino -> nome do evento enviado ao navegador (Socket.io)
+const TOPICOS_LIXEIRA = {
+  [PREFIXO + 'status']: 'lixeiraStatus',       // vazia / normal / cheia
+  [PREFIXO + 'nivel']: 'lixeiraNivel',         // 0 a 100 (% ocupado)
+  [PREFIXO + 'distancia']: 'lixeiraDistancia', // cm do sensor ate o lixo
+  [PREFIXO + 'tampa']: 'lixeiraTampa',         // aberta / fechada
+  [PREFIXO + 'aberturas']: 'lixeiraAberturas', // quantas vezes a tampa abriu
+  [PREFIXO + 'online']: 'lixeiraOnline',       // online / offline (Last Will)
+};
+
+// Historico do nivel em memoria (para o grafico). Sem banco de dados:
+// armazenamento em nuvem ficou fora do escopo da disciplina.
+const HISTORICO_MAX_MS = 2 * 60 * 60 * 1000; // guarda as ultimas 2 horas
+const HISTORICO_MAX_PONTOS = 3000;
 
 // So estes comandos podem ir para o Arduino
 const COMANDOS_VALIDOS = new Set(['abrir', 'fechar']);
@@ -32,15 +47,28 @@ const mqttClient = mqtt.connect(MQTT_URL, {
   clean: true,
 });
 
-let ultimoStatus = null; // enviado para quem abrir a pagina depois
-let ultimaTampa = null;
+// Ultimo valor de cada evento: enviado para quem abrir a pagina depois
+const ultimosValores = {};
+// Pontos { t: timestamp em ms, nivel: 0-100 } para o grafico
+let historicoNivel = [];
+let ultimaAbertura = null; // horario (ms) da ultima vez que a tampa abriu
 
 mqttClient.on('connect', () => {
   console.log('Servidor Node.js conectado ao Broker MQTT com sucesso!');
-  mqttClient.subscribe([MQTT_TOPIC_STATUS, MQTT_TOPIC_TAMPA], { qos: 1 }, (err) => {
+  mqttClient.subscribe(Object.keys(TOPICOS_LIXEIRA), { qos: 1 }, (err) => {
     if (err) console.error('Falha ao assinar os topicos:', err.message);
   });
 });
+
+function registrarNivel(nivel) {
+  const agora = Date.now();
+  historicoNivel.push({ t: agora, nivel });
+  historicoNivel = historicoNivel.filter((p) => agora - p.t <= HISTORICO_MAX_MS);
+  if (historicoNivel.length > HISTORICO_MAX_PONTOS) {
+    historicoNivel = historicoNivel.slice(-HISTORICO_MAX_PONTOS);
+  }
+  io.emit('lixeiraPontoNivel', { t: agora, nivel });
+}
 
 // Sem este handler, um erro de rede derrubaria o processo inteiro
 mqttClient.on('error', (err) => {
@@ -51,22 +79,28 @@ mqttClient.on('reconnect', () => console.log('Reconectando ao broker MQTT...'));
 mqttClient.on('offline', () => console.warn('Broker MQTT offline. Tentando de novo...'));
 
 mqttClient.on('message', (topic, message) => {
+  const evento = TOPICOS_LIXEIRA[topic];
+  if (!evento) return;
+
   const valor = message.toString().trim().toLowerCase();
   if (!valor) return;
 
-  if (topic === MQTT_TOPIC_TAMPA) {
-    ultimaTampa = valor;
-    console.log(`Tampa: ${valor}`);
-    io.emit('lixeiraTampa', valor);
-    return;
+  console.log(`[MQTT] ${topic.replace(PREFIXO, '')} = ${valor}`);
+
+  if (evento === 'lixeiraNivel') {
+    const nivel = Number(valor);
+    if (!Number.isFinite(nivel)) return;
+    registrarNivel(Math.max(0, Math.min(100, nivel)));
   }
-  if (topic !== MQTT_TOPIC_STATUS) return;
 
-  const status = valor;
+  // Marca o horario da abertura (so quando realmente muda para "aberta")
+  if (evento === 'lixeiraTampa' && valor === 'aberta' && ultimosValores.lixeiraTampa !== 'aberta') {
+    ultimaAbertura = Date.now();
+    io.emit('lixeiraUltimaAbertura', ultimaAbertura);
+  }
 
-  ultimoStatus = status;
-  console.log(`Status recebido da lixeira fisica: ${status}`);
-  io.emit('lixeiraStatus', status); // atualiza todos os navegadores conectados
+  ultimosValores[evento] = valor;
+  io.emit(evento, valor); // atualiza todos os navegadores conectados
 });
 
 // ------------------------- Socket.io -------------------------
@@ -74,8 +108,11 @@ io.on('connection', (socket) => {
   console.log('Painel web acessado por um navegador.');
 
   // Quem abre/atualiza a pagina ja recebe o ultimo estado conhecido
-  if (ultimoStatus) socket.emit('lixeiraStatus', ultimoStatus);
-  if (ultimaTampa) socket.emit('lixeiraTampa', ultimaTampa);
+  socket.emit('lixeiraHistorico', historicoNivel);
+  for (const [evento, valor] of Object.entries(ultimosValores)) {
+    socket.emit(evento, valor);
+  }
+  if (ultimaAbertura) socket.emit('lixeiraUltimaAbertura', ultimaAbertura);
 
   socket.on('enviarComando', (comando) => {
     const acao = typeof comando === 'string' ? comando.trim().toLowerCase() : '';

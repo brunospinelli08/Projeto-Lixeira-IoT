@@ -39,7 +39,7 @@
 
     .shell {
       width: 100%;
-      max-width: 480px;
+      max-width: 520px;
       display: flex;
       flex-direction: column;
       gap: 16px;
@@ -487,6 +487,84 @@
       .bin-stage { height: 220px; }
     }
 
+    .dot.offline {
+      background: var(--red);
+      box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16);
+    }
+
+    /* ---------- Indicadores (tampa, aberturas, distancia) ---------- */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .panel {
+      padding: 16px 14px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: linear-gradient(165deg, #202024 0%, #1a1a1e 100%);
+      box-shadow: 0 14px 30px rgba(0, 0, 0, 0.35);
+      min-width: 0;
+    }
+
+    .panel-label {
+      font-size: 0.64rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .panel-value {
+      margin-top: 8px;
+      font-size: 1.35rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .panel-value.aberta { color: var(--accent); }
+
+    .panel-sub {
+      margin-top: 4px;
+      font-size: 0.7rem;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ---------- Grafico ---------- */
+    .chart-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .chart-head strong { font-size: 0.9rem; font-weight: 600; }
+    .chart-head span { font-size: 0.7rem; color: var(--muted); }
+
+    .chart-box { position: relative; height: 200px; }
+
+    .chart-empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-align: center;
+      padding: 0 12px;
+    }
+
+    @media (max-width: 380px) {
+      .stats { grid-template-columns: 1fr 1fr; }
+    }
+
     .grupo {
       text-align: center;
       font-size: 0.8rem;
@@ -551,6 +629,37 @@
       <div id="nivelVal" class="level-badge">&mdash;</div>
     </main>
 
+    <!-- Dados dos dois sensores: tampa/aberturas (sensor da mao) e distancia (sensor de nivel) -->
+    <section class="stats" aria-live="polite">
+      <div class="panel">
+        <div class="panel-label">Tampa</div>
+        <div id="tampaVal" class="panel-value">&mdash;</div>
+        <div id="ultimaAberturaVal" class="panel-sub">última: &mdash;</div>
+      </div>
+      <div class="panel">
+        <div class="panel-label">Aberturas</div>
+        <div id="aberturasVal" class="panel-value">&mdash;</div>
+        <div class="panel-sub">desde que ligou</div>
+      </div>
+      <div class="panel">
+        <div class="panel-label">Distância</div>
+        <div id="distanciaVal" class="panel-value">&mdash;</div>
+        <div class="panel-sub">sensor → lixo</div>
+      </div>
+    </section>
+
+    <!-- Grafico do nivel ao longo do tempo (historico guardado pelo servidor) -->
+    <section class="panel">
+      <div class="chart-head">
+        <strong>Nível ao longo do tempo</strong>
+        <span>últimas 2 horas</span>
+      </div>
+      <div class="chart-box">
+        <canvas id="graficoNivel" aria-label="Gráfico do nível da lixeira"></canvas>
+        <div id="graficoVazio" class="chart-empty">Aguardando dados do sensor de nível…</div>
+      </div>
+    </section>
+
     <div class="actions">
       <button class="btn btn-abrir" type="button" data-comando="abrir">Abrir</button>
       <button class="btn btn-fechar" type="button" data-comando="fechar">Fechar</button>
@@ -565,6 +674,8 @@
   <div id="toast" class="toast" role="status"></div>
 
   <script src="/socket.io/socket.io.js"></script>
+  <!-- Chart.js: biblioteca do grafico (se faltar internet, o resto do painel continua funcionando) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script>
     const socket = io();
 
@@ -579,12 +690,120 @@
     const toast = document.getElementById('toast');
     const botoes = document.querySelectorAll('[data-comando]');
 
+    const tampaVal = document.getElementById('tampaVal');
+    const ultimaAberturaVal = document.getElementById('ultimaAberturaVal');
+    const aberturasVal = document.getElementById('aberturasVal');
+    const distanciaVal = document.getElementById('distanciaVal');
+    const graficoVazio = document.getElementById('graficoVazio');
+
     const LIMITE_CHEIA = 80; // a partir de 80% o painel entra em alerta
     const LIMITE_VAZIA = 15; // ate 15% conta como vazia
+    const JANELA_GRAFICO_MS = 2 * 60 * 60 * 1000; // mostra as ultimas 2 horas
     let avisoTimer = null;
     let ressincTimer = null;
     let estadoAtual = null;   // 'vazia' | 'normal' | 'cheia'
+    let nivelReal = null;     // % ocupado enviado pelo Arduino (topico nivel)
     let tampaAberta = false;  // estado real enviado pelo Arduino
+    let servidorOnline = false;
+    let lixeiraOnline = null; // true / false / null (ainda nao sabemos)
+
+    function hora(ms) {
+      return new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    // ---------- Indicador de conexao (servidor + Arduino via Last Will) ----------
+    function atualizarConexao() {
+      connDot.classList.remove('online', 'offline');
+      if (!servidorOnline) {
+        connDot.classList.add('offline');
+        connText.innerText = 'SEM SERVIDOR';
+      } else if (lixeiraOnline === true) {
+        connDot.classList.add('online');
+        connText.innerText = 'LIXEIRA ONLINE';
+      } else if (lixeiraOnline === false) {
+        connDot.classList.add('offline');
+        connText.innerText = 'LIXEIRA OFFLINE';
+      } else {
+        connText.innerText = 'AGUARDANDO';
+      }
+      // Botoes so funcionam com o servidor conectado e a lixeira nao offline
+      const liberar = servidorOnline && lixeiraOnline !== false;
+      botoes.forEach((btn) => (btn.disabled = !liberar));
+    }
+
+    // ---------- Grafico do nivel (Chart.js) ----------
+    let grafico = null;
+
+    function criarGrafico() {
+      if (!window.Chart) {
+        graficoVazio.innerText = 'Gráfico indisponível (sem internet para carregar o Chart.js)';
+        return;
+      }
+      const corTexto = '#8d8d99';
+      const corGrade = 'rgba(255, 255, 255, 0.06)';
+      grafico = new Chart(document.getElementById('graficoNivel'), {
+        type: 'line',
+        data: {
+          datasets: [{
+            label: 'Nível (%)',
+            data: [],
+            borderColor: '#4f7cff',
+            backgroundColor: 'rgba(79, 124, 255, 0.15)',
+            fill: true,
+            tension: 0.3,
+            borderWidth: 2,
+            pointRadius: 2,
+            pointHoverRadius: 5,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          parsing: false, // os dados ja vem como { x: horario, y: nivel }
+          interaction: { mode: 'nearest', intersect: false },
+          scales: {
+            x: {
+              type: 'linear',
+              ticks: { color: corTexto, maxTicksLimit: 5, callback: (v) => hora(v) },
+              grid: { color: corGrade },
+            },
+            y: {
+              min: 0,
+              max: 100,
+              ticks: { color: corTexto, stepSize: 25, callback: (v) => `${v}%` },
+              grid: { color: corGrade },
+            },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: (itens) => hora(itens[0].parsed.x),
+                label: (item) => ` ${item.parsed.y}% ocupado`,
+              },
+            },
+          },
+        },
+      });
+    }
+
+    function adicionarPonto(t, nivel) {
+      if (!grafico) return;
+      const dados = grafico.data.datasets[0].data;
+      dados.push({ x: t, y: nivel });
+      // Remove pontos mais antigos que a janela do grafico
+      while (dados.length && t - dados[0].x > JANELA_GRAFICO_MS) dados.shift();
+      graficoVazio.style.display = dados.length ? 'none' : 'grid';
+      grafico.update('none');
+    }
+
+    function carregarHistorico(pontos) {
+      if (!grafico || !Array.isArray(pontos)) return;
+      grafico.data.datasets[0].data = pontos.map((p) => ({ x: p.t, y: p.nivel }));
+      graficoVazio.style.display = pontos.length ? 'none' : 'grid';
+      grafico.update('none');
+    }
 
     function avisar(mensagem) {
       toast.textContent = mensagem;
@@ -596,6 +815,8 @@
     // A tampa agora e controlada pelo sensor de mao (fora da caixa), nao pelo nivel
     function sincronizarTampa() {
       bin.classList.toggle('aberta', tampaAberta);
+      tampaVal.innerText = tampaAberta ? 'ABERTA' : 'FECHADA';
+      tampaVal.classList.toggle('aberta', tampaAberta);
     }
 
     // Comando manual: mostra na hora; o Arduino confirma pelo topico da tampa
@@ -611,14 +832,27 @@
       cheia:  { texto: 'CHEIA',  cor: 'var(--red)',   dica: 'Compartimento cheio — necessita esvaziamento', nivel: 90 },
     };
 
-    // Desenha o estado recebido da lixeira (nivel opcional em %)
+    // Desenha o nivel no desenho da lixeira e no selo "% ocupado"
+    function desenharNivel() {
+      const info = ESTADOS[estadoAtual];
+      const valor = nivelReal ?? (info ? info.nivel : null);
+      if (valor === null) return;
+      binFill.style.height = `${Math.max(valor, 3)}%`;
+      nivelVal.innerText = nivelReal === null ? info.texto.toLowerCase() : `${nivelReal}% ocupado`;
+    }
+
+    // Recebe o nivel REAL (0-100%) publicado pelo Arduino no topico nivel
+    function aplicarNivel(nivel) {
+      nivelReal = Math.max(0, Math.min(100, Math.round(nivel)));
+      desenharNivel();
+    }
+
+    // Desenha o estado recebido da lixeira (vazia / normal / cheia)
     function aplicarEstado(estado, nivel) {
       const info = ESTADOS[estado];
       if (!info) return;
-      const valor = Math.max(0, Math.min(100, Math.round(nivel ?? info.nivel)));
       const cheia = estado === 'cheia';
 
-      binFill.style.height = `${Math.max(valor, 3)}%`;
       statusCard.classList.toggle('is-cheia', cheia);
       statusCard.classList.toggle('is-normal', !cheia);
 
@@ -630,13 +864,15 @@
       }
       statusVal.style.color = info.cor;
       statusHint.innerText = info.dica;
-      nivelVal.innerText = nivel === undefined ? info.texto.toLowerCase() : `${valor}% ocupado`;
 
       // Aviso quando o estado muda (nao no primeiro carregamento)
       if (estadoAtual !== null && estadoAtual !== estado) {
         avisar(cheia ? 'Atenção: lixeira CHEIA!' : `Lixeira agora está ${info.texto}`);
       }
       estadoAtual = estado;
+
+      if (nivel !== undefined) aplicarNivel(nivel);
+      else desenharNivel();
     }
 
     // Aceita "vazia"/"normal"/"cheia" (Arduino) ou um número/percentual ("50", "90%")
@@ -657,15 +893,45 @@
     }
 
     socket.on('connect', () => {
-      connDot.classList.add('online');
-      connText.innerText = 'ONLINE';
-      botoes.forEach((btn) => (btn.disabled = false));
+      servidorOnline = true;
+      atualizarConexao();
     });
 
     socket.on('disconnect', () => {
-      connDot.classList.remove('online');
-      connText.innerText = 'OFFLINE';
-      botoes.forEach((btn) => (btn.disabled = true));
+      servidorOnline = false;
+      atualizarConexao();
+    });
+
+    // ---------- Dados vindos do servidor (que assina os topicos MQTT) ----------
+    socket.on('lixeiraOnline', (valor) => {
+      const agora = String(valor).trim().toLowerCase() === 'online';
+      if (lixeiraOnline !== null && lixeiraOnline !== agora) {
+        avisar(agora ? 'Lixeira conectada' : 'Lixeira desconectada!');
+      }
+      lixeiraOnline = agora;
+      atualizarConexao();
+    });
+
+    socket.on('lixeiraNivel', (valor) => {
+      const n = Number(valor);
+      if (Number.isFinite(n)) aplicarNivel(n);
+    });
+
+    socket.on('lixeiraHistorico', carregarHistorico);
+    socket.on('lixeiraPontoNivel', (p) => adicionarPonto(p.t, p.nivel));
+
+    socket.on('lixeiraDistancia', (valor) => {
+      const cm = Number(valor);
+      if (Number.isFinite(cm)) distanciaVal.innerText = `${cm.toFixed(1)} cm`;
+    });
+
+    socket.on('lixeiraAberturas', (valor) => {
+      const n = Number(valor);
+      if (Number.isFinite(n)) aberturasVal.innerText = String(n);
+    });
+
+    socket.on('lixeiraUltimaAbertura', (ms) => {
+      ultimaAberturaVal.innerText = `última: ${hora(ms)}`;
     });
 
     socket.on('lixeiraStatus', (status) => {
@@ -689,8 +955,9 @@
       });
     });
 
+    criarGrafico();
     // Botões só são liberados quando o servidor conectar
-    botoes.forEach((btn) => (btn.disabled = true));
+    atualizarConexao();
   </script>
 </body>
 </html>

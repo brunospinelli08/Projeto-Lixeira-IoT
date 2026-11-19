@@ -6,6 +6,7 @@
 - Servo da tampa: pino 9
 - Regra: a tampa fica SEMPRE fechada e so abre quando o sensor de fora detecta a mao.
          Depois que a mao sai, espera TEMPO_TAMPA_ABERTA e fecha sozinha.
+- Dados enviados ao site (MQTT): status, nivel (%), distancia (cm), tampa, aberturas, online/offline
  */
 
 #include <WiFiS3.h>
@@ -18,9 +19,15 @@ const char* password    = "SUA_SENHA_WIFI";
 const char* mqtt_server = "broker.hivemq.com";
 const int   mqtt_port   = 1883;
 
-const char* topicoStatus  = "eseg/lixeira/juan-caua-bruno/status";   // vazia / normal / cheia
-const char* topicoTampa   = "eseg/lixeira/juan-caua-bruno/tampa";    // aberta / fechada
-const char* topicoComando = "eseg/lixeira/juan-caua-bruno/comando";  // abrir / fechar (site)
+// Todos os topicos publicados pelo Arduino usam retain = true:
+// o broker guarda o ultimo valor e entrega na hora para quem assinar depois.
+const char* topicoStatus    = "eseg/lixeira/juan-caua-bruno/status";     // vazia / normal / cheia
+const char* topicoNivel     = "eseg/lixeira/juan-caua-bruno/nivel";      // 0 a 100 (% ocupado)
+const char* topicoDistancia = "eseg/lixeira/juan-caua-bruno/distancia";  // cm do sensor ate o lixo
+const char* topicoTampa     = "eseg/lixeira/juan-caua-bruno/tampa";      // aberta / fechada
+const char* topicoAberturas = "eseg/lixeira/juan-caua-bruno/aberturas";  // quantas vezes a tampa abriu
+const char* topicoOnline    = "eseg/lixeira/juan-caua-bruno/online";     // online / offline (Last Will)
+const char* topicoComando   = "eseg/lixeira/juan-caua-bruno/comando";    // abrir / fechar (vem do site)
 
 // ---------- Pinos ----------
 const int pinTrigNivel = 5;   // sensor dentro da caixa
@@ -41,12 +48,21 @@ const unsigned long INTERVALO_WIFI      = 10000;  // tenta reconectar a cada 10 
 const unsigned long TIMEOUT_WIFI        = 20000;  // nao trava o boot para sempre
 const unsigned long HEARTBEAT_STATUS_MS = 30000;  // repete o status a cada 30 s
 
-// Sensor de nivel (distancia do sensor ate o lixo). Ajuste LIMITE_VAZIA a altura da sua caixa.
-const int LIMITE_CHEIA        = 10;  // cm: abaixo disso = cheia
-const int LIMITE_SAI_CHEIA    = 12;  // cm: precisa passar disso para deixar de ser cheia
-const int LIMITE_SAI_VAZIA    = 23;  // cm: abaixo disso deixa de ser vazia
-const int LIMITE_VAZIA        = 25;  // cm: acima disso = vazia
+// Sensor de nivel (distancia do sensor ate o lixo)
+// DIST_VAZIA: distancia do sensor ate o FUNDO com a caixa vazia (meca com uma regua!)
+// E a UNICA medida que precisa ser ajustada: os limites abaixo se adaptam a ela.
+constexpr float DIST_VAZIA       = 30.0;              // cm  <-- AJUSTE AQUI
+constexpr float LIMITE_CHEIA     = 10;                // cm: abaixo disso = cheia
+constexpr float LIMITE_SAI_CHEIA = 12;                // cm: precisa passar disso para deixar de ser cheia
+constexpr float LIMITE_VAZIA     = DIST_VAZIA - 5;    // cm: acima disso = vazia (lixo com menos de 5 cm)
+constexpr float LIMITE_SAI_VAZIA = DIST_VAZIA - 7;    // cm: abaixo disso deixa de ser vazia
+static_assert(LIMITE_SAI_VAZIA > LIMITE_SAI_CHEIA, "DIST_VAZIA muito pequena: a caixa precisa ter mais de 19 cm");
 const int LEITURAS_PARA_CONFIRMAR = 2;  // evita trocar de estado por 1 leitura ruidosa
+
+// Conversao distancia -> porcentagem de ocupacao
+// Fundo vazio (DIST_VAZIA) = 0%. Lixo em LIMITE_CHEIA (10 cm do sensor) = 100% ocupado.
+constexpr float DIST_100_PORCENTO  = LIMITE_CHEIA;
+const int       VARIACAO_MIN_NIVEL = 2;     // so publica o nivel se mudar 2% ou mais
 
 // Sensor de mao
 const int DISTANCIA_MAO = 15;           // cm: mao a menos disso abre a tampa
@@ -70,10 +86,19 @@ String statusPublicado = "";
 String statusCandidato = "";
 int    leiturasCandidato = 0;
 
+float  distanciaAtual   = -1;    // ultima distancia valida (cm); -1 = ainda nao mediu
+float  distanciaSuavizada   = -1;    // media movel da distancia (tira o ruido)
+int    nivelAtual       = -1;    // 0 a 100 (%); -1 = ainda nao mediu
+int    nivelPublicado   = -100;
+unsigned long ultimoEnvioNivel = 0;
+
 bool   tampaAberta     = false;
 bool   tampaPublicada  = true;   // forca a primeira publicacao
 bool   tampaJaEnviada  = false;
 int    leiturasMao     = 0;
+
+unsigned long aberturas          = 0;   // conta desde que a placa ligou
+long          aberturasPublicadas = -1;
 
 char clientId[32] = "ESEGLixeiraR4";
 
@@ -109,6 +134,7 @@ void montarClientId() {
 
 // ================= Tampa =================
 void publicarTampa(bool forcar);
+void publicarAberturas(bool forcar);
 
 void moverTampa(bool abrir) {
   if (abrir == tampaAberta) return;   // so aciona o servo quando muda (evita zumbido)
@@ -116,7 +142,11 @@ void moverTampa(bool abrir) {
   tampaServo.write(abrir ? ANGULO_ABERTA : ANGULO_FECHADA);
   tampaAberta = abrir;
   Serial.println(abrir ? "-> Tampa ABERTA." : "-> Tampa FECHADA.");
+
+  if (abrir) aberturas++;   // conta cada abertura (mao ou site)
+
   publicarTampa(false);
+  publicarAberturas(false);
 }
 
 // ================= MQTT =================
@@ -172,16 +202,51 @@ void publicarTampa(bool forcar) {
   }
 }
 
+// Publica nivel (%) e distancia (cm) juntos
+void publicarNivel(bool forcar) {
+  if (!client.connected() || nivelAtual < 0) return;
+
+  bool mudou     = abs(nivelAtual - nivelPublicado) >= VARIACAO_MIN_NIVEL;
+  bool heartbeat = (millis() - ultimoEnvioNivel >= HEARTBEAT_STATUS_MS);
+  if (!forcar && !mudou && !heartbeat) return;
+
+  char texto[12];
+  snprintf(texto, sizeof(texto), "%d", nivelAtual);
+  if (client.publish(topicoNivel, texto, true)) {
+    nivelPublicado   = nivelAtual;
+    ultimoEnvioNivel = millis();
+  }
+
+  String dist = String(distanciaAtual, 1);   // ex.: "18.4"
+  client.publish(topicoDistancia, dist.c_str(), true);
+}
+
+void publicarAberturas(bool forcar) {
+  if (!client.connected()) return;
+  if (!forcar && (long)aberturas == aberturasPublicadas) return;
+
+  char texto[12];
+  snprintf(texto, sizeof(texto), "%lu", aberturas);
+  if (client.publish(topicoAberturas, texto, true)) {
+    aberturasPublicadas = (long)aberturas;
+  }
+}
+
 void tentarConectarMQTT() {
   if (millis() - ultimaTentativaMQTT < INTERVALO_MQTT) return;
   ultimaTentativaMQTT = millis();
 
   Serial.print("Conectando ao broker MQTT...");
-  if (client.connect(clientId)) {
+  // Last Will (testamento): se o Arduino cair sem avisar, o PROPRIO BROKER
+  // publica "offline" no topico online. Assim o site sabe que a lixeira desligou.
+  if (client.connect(clientId, topicoOnline, 1, true, "offline")) {
     Serial.println(" conectado!");
+    client.publish(topicoOnline, "online", true);
     client.subscribe(topicoComando, 1);
     publicarStatus(true);
+    publicarNivel(true);
     publicarTampa(true);
+    publicarAberturas(true);
   } else {
     Serial.print(" falhou (rc=");
     Serial.print(client.state());
@@ -212,9 +277,20 @@ void lerSensorNivel() {
     return;
   }
 
+  // Media movel simples: metade leitura nova, metade valor anterior (tira o ruido)
+  if (distanciaSuavizada < 0) distanciaSuavizada = distancia;
+  distanciaSuavizada = 0.5 * distancia + 0.5 * distanciaSuavizada;
+  distanciaAtual = distanciaSuavizada;
+
+  // Converte distancia em % ocupado: DIST_VAZIA = 0%, DIST_100_PORCENTO = 100%
+  float pct = (DIST_VAZIA - distanciaAtual) / (DIST_VAZIA - DIST_100_PORCENTO) * 100.0;
+  nivelAtual = constrain((int)(pct + 0.5), 0, 100);
+
   Serial.print("Nivel - distancia ate o lixo: ");
   Serial.print(distancia, 1);
-  Serial.println(" cm");
+  Serial.print(" cm  |  ocupacao: ");
+  Serial.print(nivelAtual);
+  Serial.println(" %");
 
   // Faixas com histerese: nas zonas entre os limites mantem o estado anterior
   String lido = "";
@@ -241,6 +317,7 @@ void lerSensorNivel() {
   }
 
   publicarStatus(false);
+  publicarNivel(false);
 }
 
 // Sensor de fora: abre a tampa ao aproximar a mao, fecha sozinha depois
